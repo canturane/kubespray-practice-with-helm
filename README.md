@@ -272,8 +272,6 @@ helm install postgresql bitnami/postgresql \
 
 PostgreSQL'i de `worker2`'ye sabitleme sebebimiz yük dengesizliğidir. Elasticsearch ile birlikte `worker2`'de çalışmalarına rağmen bu iki servis birlikte `worker1`'den daha az kaynak tüketmektedir.
 
-> ⚠️ Bitnami, Ağustos 2025'ten itibaren bazı image'larını ücretli plana taşıdı. Kurulum çıktısında bu uyarıyı görmek normaldir.
-
 <img src="images/postgres.png" width="600">
 
 ---
