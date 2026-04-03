@@ -216,7 +216,7 @@ Playbook sonunda Patroni cluster durumu otomatik olarak raporlanır:
 
 ### 7.4 Veritabanı Listesi
 
-<img src="images/x5.png" width="800">
+<img src="images/x6.png" width="800">
 
 Varsayılan olarak `postgres`, `template0` ve `template1` veritabanları oluşturulmuştur. 
 
@@ -224,7 +224,7 @@ Varsayılan olarak `postgres`, `template0` ve `template1` veritabanları oluştu
 
 ### 7.5 Kullanıcı Listesi
 
-<img src="images/x6.png" width="800">
+<img src="images/x5.png" width="800">
 
 | Role | Yetkiler |
 |------|---------|
