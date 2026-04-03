@@ -226,12 +226,6 @@ Varsayılan olarak `postgres`, `template0` ve `template1` veritabanları oluştu
 
 <img src="images/x5.png" width="800">
 
-| Role | Yetkiler |
-|------|---------|
-| postgres | Superuser, Create role, Create DB, Replication, Bypass RLS |
-| replicator | Replication |
-| pgbouncer | Connection pooling auth |
-
 ---
 
 ### 7.6 Patronictl ile Cluster Durumu
