@@ -1,78 +1,187 @@
-# PostgreSQL 3-Node HA Cluster Kurulumu
+# PostgreSQL 3-Node High Availability Cluster Setup
+## Autobase (postgresql_cluster) + HAProxy + Keepalived on Ubuntu 24.04
 
-## Ortam Bilgileri
+---
 
-| Node | IP Adresi | Rol |
-|------|-----------|-----|
-| pg-master | 10.119.14.59 | Leader (Primary) |
-| pg-worker1 | 10.119.14.152 | Replica |
-| pg-worker2 | 10.119.14.77 | Replica |
+## Environment
 
-> **Not:** 3 adet Ubuntu 24.04 LTS VirtualBox makine kullanılmıştır. Her node 2 CPU, 4 GB RAM, 25 GB disk ile yapılandırılmıştır.
+| Node | IP Address | Role |
+|------|------------|------|
+| pg-master | 10.40.71.50 | Patroni Leader (Primary) |
+| pg-worker1 | 10.40.71.51 | Patroni Replica |
+| pg-worker2 | 10.40.71.52 | Patroni Replica |
+| VIP | 10.40.70.200 | Virtual IP managed by Keepalived |
+
+All nodes: Ubuntu 24.04 LTS, 2 CPU, 4 GB RAM, 25 GB Disk(Tested)
+
+---
+
+## Architecture Overview
+
+```
+Client
+  |
+10.40.70.200:5000  (VIP - managed by Keepalived, currently bound to the Leader node)
+  |
+HAProxy  (running on all 3 nodes)
+  |
+  +--- pg-master  (10.40.71.50)  Leader   - PostgreSQL read/write
+  +--- pg-worker1 (10.40.71.51)  Replica  - PostgreSQL read-only / streaming
+  +--- pg-worker2 (10.40.71.52) Replica  - PostgreSQL read-only / streaming
+```
+
+**Port map:**
+
+| Port | Service | Description |
+|------|---------|-------------|
+| 5000 | HAProxy | Primary (write) |
+| 5001 | HAProxy | Replica (read-only) |
+| 5432 | PostgreSQL | Direct connection (bypass HAProxy) |
+| 6432 | PgBouncer | Connection pooling |
+| 8008 | Patroni API | Health check endpoint |
+| 2379 | etcd | Client communication |
+| 2380 | etcd | Peer communication |
 
 
 ---
 
-## 1. SSH Key Kurulumu
+## Step 1 - Set Hostnames
 
-Ansible'ın tüm node'lara şifresiz bağlanabilmesi için Master'dan SSH key üretilir ve diğer node'lara dağıtılır.
+Run the following command on each node individually.
 
-**Master node'da çalıştır:**
+**On pg-master (10.40.71.50):**
+```bash
+hostnamectl set-hostname pg-master
+exec bash
+```
+
+**On pg-worker1 (10.40.71.51):**
+```bash
+hostnamectl set-hostname pg-worker1
+exec bash
+```
+
+**On pg-worker2 (10.40.71.52):**
+```bash
+hostnamectl set-hostname pg-worker2
+exec bash
+```
+
+Verify:
+```bash
+hostname
+```
+
+---
+
+## Step 2 - Update /etc/hosts on All Nodes
+
+Run the following on **all three nodes**:
 
 ```bash
+vim /etc/hosts
+```
+
+Append the following lines at the end of the file:
+
+```
+10.40.71.50  pg-master
+10.40.71.51  pg-worker1
+10.40.71.52 pg-worker2
+```
+
+Save and exit (`:wq`).
+
+Verify name resolution from pg-master:
+```bash
+ping -c2 pg-worker1
+ping -c2 pg-worker2
+```
+
+---
+
+## Step 3 - Generate SSH Key on pg-master
+
+Ansible will manage all nodes from pg-master over SSH. A passwordless key pair is required.
+
+**On pg-master:**
+```bash
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
+```
+
+Display the public key:
+```bash
 cat ~/.ssh/id_ed25519.pub
 ```
 
-**Worker1 ve Worker2'de çalıştır:**
+Copy the output. You will need it in the next step.
 
+---
+
+## Step 4 - Distribute SSH Public Key to All Nodes
+
+**On pg-master (self):**
 ```bash
-mkdir -p ~/.ssh && chmod 700 ~/.ssh
-echo "SSH_PUBLIC_KEY" >> ~/.ssh/authorized_keys
+cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
 ```
 
-**Master'dan bağlantıyı doğrula:**
+**On pg-worker1:**
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+vim ~/.ssh/authorized_keys
+```
+
+Paste the public key copied from pg-master. Save and exit.
 
 ```bash
-ssh -o StrictHostKeyChecking=no root@10.119.14.152 "hostname && echo OK"
-ssh -o StrictHostKeyChecking=no root@10.119.14.77 "hostname && echo OK"
+chmod 600 ~/.ssh/authorized_keys
+```
+
+**On pg-worker2:**
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+vim ~/.ssh/authorized_keys
+```
+
+Paste the public key. Save and exit.
+
+```bash
+chmod 600 ~/.ssh/authorized_keys
 ```
 
 ---
 
-## 2. Hostname Yapılandırması
+## Step 5 - Verify SSH Connectivity from pg-master
 
-etcd cluster her node'u unique isimle tanımlar. Tüm node'lar "ubuntu" ismiyle geldiği için ayrı hostname atanması zorunludur.
-
-**Master'dan tüm node'larda çalıştır:**
-
+**On pg-master:**
 ```bash
-hostnamectl set-hostname pg-master
-ssh root@10.119.14.152 "hostnamectl set-hostname pg-worker1"
-ssh root@10.119.14.77 "hostnamectl set-hostname pg-worker2"
+ssh -o StrictHostKeyChecking=no root@pg-worker1 "hostname && echo OK"
+ssh -o StrictHostKeyChecking=no root@pg-worker2 "hostname && echo OK"
+ssh -o StrictHostKeyChecking=no root@10.40.71.50 "hostname && echo OK"
 ```
 
-**/etc/hosts dosyasını güncelle (tüm node'larda):**
-
-```bash
-for host in 10.119.14.59 10.119.14.152 10.119.14.77; do
-  ssh -o StrictHostKeyChecking=no root@$host "cat >> /etc/hosts << 'EOF'
-10.119.14.59  pg-master
-10.119.14.152 pg-worker1
-10.119.14.77  pg-worker2
-EOF"
-done
+Expected output for each command:
+```
+pg-worker1
+OK
+```
+```
+pg-worker2
+OK
+```
+```
+pg-master
+OK
 ```
 
 ---
 
-## 3. Ansible Kurulumu
+## Step 6 - Install Ansible on pg-master
 
-Ubuntu 24.04'ün varsayılan reposundaki Ansible versiyonu (2.16.x) Autobase için yetersizdir. **Minimum 2.17.0** gereklidir. PPA üzerinden güncel versiyon kurulur.
+Ubuntu 24.04 ships with Ansible 2.16.x by default. Autobase requires a minimum of 2.17.0. Install from the official Ansible.
 
-**Master node'da çalıştır:**
-
+**On pg-master:**
 ```bash
 apt update && apt install -y software-properties-common git python3-pip
 add-apt-repository --yes --update ppa:ansible/ansible
@@ -80,47 +189,63 @@ apt install -y ansible
 ansible --version
 ```
 
-`ansible [core 2.20.x]` görünmelidir.
+The output must show `ansible [core 2.17.x]` or higher.
+
+**Packages installed:**
+- `software-properties-common` - Provides `add-apt-repository` utility
+- `git` - Required to clone the Autobase repository
+- `python3-pip` - Python package manager, used by Ansible dependencies
+- `ansible` - Automation engine that will orchestrate the cluster deployment
 
 ---
 
-## 4. Autobase Reposunu Clone'la
+## Step 7 - Clone the Autobase Repository
 
+**On pg-master:**
 ```bash
 cd /opt
-git clone --depth=1 https://github.com/autobase-tech/autobase.git
-cd /opt/autobase/automation
+git clone --depth=1 https://github.com/vitabaks/postgresql_cluster.git
+cd /opt/postgresql_cluster/automation
 ```
 
-**Ansible Galaxy collection'larını yükle:**
+`--depth=1` fetches only the latest commit, significantly reducing download size and avoiding timeout errors on slow connections.
 
+---
+
+## Step 8 - Install Ansible Galaxy Collections
+
+**On pg-master:**
 ```bash
+cd /opt/postgresql_cluster/automation
 ansible-galaxy collection build --output-path /tmp/autobase-collection .
 ansible-galaxy collection install /tmp/autobase-collection/vitabaks-autobase-*.tar.gz --force
 ansible-galaxy install -r requirements.yml
 ```
 
+**What this does:**
+- Builds the local Autobase collection into a distributable archive
+- Installs the collection and all its dependencies (community.postgresql, ansible.posix, etc.)
+- `requirements.yml` installs any additional roles declared by the project
+
 ---
 
-## 5. Inventory ve Vars Dosyalarını Oluştur
+## Step 9 - Create the Inventory File
 
-**Inventory dosyası:**
-
+**On pg-master:**
 ```bash
-mkdir /opt/autobase/automation/inventory
+mkdir -p /opt/postgresql_cluster/automation/inventory
+vim /opt/postgresql_cluster/automation/inventory/hosts.ini
 ```
 
-```bash
-vim cat > /opt/autobase/automation/inventory/hosts.ini 
-```
+Enter the following content:
 
-```yaml
+```ini
 [master]
-10.119.14.59 ansible_user=root
+10.40.71.50 ansible_user=root
 
 [replica]
-10.119.14.152 ansible_user=root
-10.119.14.77 ansible_user=root
+10.40.71.51 ansible_user=root
+10.40.71.52 ansible_user=root
 
 [postgres_cluster:children]
 master
@@ -128,189 +253,167 @@ replica
 
 [etcd_cluster:children]
 postgres_cluster
+
+[balancers:children]
+postgres_cluster
 ```
 
-**Vars dosyası:**
+Save and exit.
 
+**Important:** The `[balancers]` group is required for HAProxy and Keepalived to be deployed. If this group is missing, the load balancing components will be silently skipped during deployment.
+
+---
+
+## Step 10 - Create the Variables File
+
+**On pg-master:**
 ```bash
-mkdir -p /opt/autobase/automation/vars
+mkdir -p /opt/postgresql_cluster/automation/vars
+vim /opt/postgresql_cluster/automation/vars/main.yml
 ```
 
-```bash
-vim /opt/autobase/automation/vars/main.yml
-```
+Enter the following content:
 
 ```yaml
 cluster_name: "postgres-cluster"
 postgresql_version: 17
 dcs_type: "etcd"
+
 patroni_superuser_username: "postgres"
-patroni_superuser_password: "SuperSecret123"
+patroni_superuser_password: "Kx9mR2vNpQ7wLsY4"
 patroni_replication_username: "replicator"
-patroni_replication_password: "ReplicatorSecret123"
+patroni_replication_password: "Tz5jH8cBnW3qXuA6"
+
 with_haproxy_load_balancing: true
-postgresql_password: "PostgresSecret123"
+cluster_vip: "10.40.70.200"
 ```
 
+Save and exit.
 
-**Ansible ping testi:**
 
-```bash
-ansible all -i /opt/autobase/automation/inventory/hosts.ini -m ping
-```
-
-3 node'da da `pong` dönmelidir.
+**Note on passwords:** Passwords are stored in plain text here for simplicity in a test environment. In production, use `ansible-vault encrypt vars/main.yml` to encrypt the file at rest and pass `--ask-vault-pass` at deploy time.
 
 ---
 
-## 6. Cluster Deploy
+## Step 11 - Verify Ansible Connectivity
 
+**On pg-master:**
 ```bash
-cd /opt/autobase/automation
+ansible all -i /opt/postgresql_cluster/automation/inventory/hosts.ini -m ping
+```
+
+All three nodes must return `pong`:
+
+```
+10.40.71.50  | SUCCESS => { "ping": "pong" }
+10.40.71.51  | SUCCESS => { "ping": "pong" }
+10.40.71.52 | SUCCESS => { "ping": "pong" }
+```
+
+Do not proceed if any node fails.
+
+---
+
+## Step 12 - Deploy the Cluster
+
+**On pg-master:**
+```bash
+cd /opt/postgresql_cluster/automation
 ansible-playbook playbooks/deploy_pgcluster.yml \
   -i inventory/hosts.ini \
   --extra-vars "@vars/main.yml"
 ```
 
-> **Not:** Kurulum yaklaşık 20-30 dakika sürer. etcd, Patroni, PgBouncer, HAProxy ve Netdata otomatik olarak kurulur ve yapılandırılır.
+This playbook installs and configures the following on all nodes:
+- PostgreSQL 17
+- Patroni
+- etcd (with TLS)
+- PgBouncer
+- HAProxy
+- Keepalived
+- confd
+- Netdata (monitoring agent)
+- chrony
+
+**Expected final output:**
+
+```
+PLAY RECAP
+10.40.71.50  : ok=177  changed=84  unreachable=0  failed=0
+10.40.71.51  : ok=126  changed=67  unreachable=0  failed=0
+10.40.71.52 : ok=126  changed=68  unreachable=0  failed=0
+```
+
+`failed=0` on all nodes confirms a successful deployment.
 
 ---
 
-## 7. Kurulum Sonuçları
+## Step 13 - Verify the Cluster
 
-### 7.1 PLAY RECAP — Tüm Node'lar Başarılı
+### 13.1 - Service Status
 
-<img src="images/x1.png" width="800">
+**On pg-master:**
+```bash
+systemctl status patroni etcd pgbouncer haproxy keepalived --no-pager
+```
 
-`failed=0` tüm node'larda — kurulum hatasız tamamlanmıştır.
+All five services must show `active (running)`.
 
----
+### 13.2 - Virtual IP Assignment
 
-### 7.2 Cluster Bilgisi — Patroni Cluster Durumu
+```bash
+ip a | grep 10.40.70.200
+```
 
-<img src="images/x3.png" width="800">
+Expected output:
+```
+inet 10.40.70.200/32 scope global enp0s3
+```
 
-Playbook sonunda Patroni cluster durumu otomatik olarak raporlanır:
+The VIP is bound to the current Leader node.
 
-| Member | Host | Role | State | Lag |
-|--------|------|------|-------|-----|
-| pg-master | 10.119.14.59 | Leader | running | — |
-| pg-worker1 | 10.119.14.152 | Replica | streaming | 0 |
-| pg-worker2 | 10.119.14.77 | Replica | streaming | 0 |
-
-`streaming` durumu ve `Lag: 0` replikasyonun gerçek zamanlı ve sağlıklı çalıştığını doğrular.
-
----
-
-### 7.3 Bağlantı Bilgileri
-
-
-| Parametre | Değer |
-|-----------|-------|
-| Superuser | postgres |
-| Password | SuperSecret123 |
-| Primary port (write) | 5000 |
-| Replica port (readonly) | 5001 |
-
----
-
-### 7.4 Veritabanı Listesi
-
-<img src="images/x6.png" width="800">
-
-Varsayılan olarak `postgres`, `template0` ve `template1` veritabanları oluşturulmuştur. 
-
----
-
-### 7.5 Kullanıcı Listesi
-
-<img src="images/x5.png" width="800">
-
----
-
-### 7.6 Patronictl ile Cluster Durumu
-
-<img src="images/x2.png" width="800">
+### 13.3 - Patroni Cluster State
 
 ```bash
 patronictl -c /etc/patroni/patroni.yml list
 ```
 
----
-
-## 8. Cluster Doğrulama Testleri
-
-### 8.1 Servis Durumları
-
-```bash
-systemctl status patroni etcd pgbouncer --no-pager
+Expected output:
+```
++ Cluster: postgres-cluster ---+----+-------------+-----+
+| Member     | Host           | Role    | State     | Lag |
++------------+----------------+---------+-----------+-----+
+| pg-master  | 10.40.71.50  | Leader  | running   |     |
+| pg-worker1 | 10.40.71.51  | Replica | streaming |   0 |
+| pg-worker2 | 10.40.71.52 | Replica | streaming |   0 |
++------------+----------------+---------+-----------+-----+
 ```
 
-Beklenen: 3 servis de `active (running)` olmalıdır.
+`streaming` state and `Lag: 0` confirm that replication is healthy and real-time.
 
-### 8.2 etcd Cluster Sağlığı
-
-```bash
-etcdctl --cacert=/etc/patroni/tls/etcd/ca.crt \
-        --cert=/etc/patroni/tls/etcd/server.crt \
-        --key=/etc/patroni/tls/etcd/server.key \
-        --endpoints=https://127.0.0.1:2379 \
-        endpoint health
-```
-
-### 8.3 PostgreSQL Bağlantı Testi (PgBouncer üzerinden)
+### 13.4 - Primary Connection Test (Write)
 
 ```bash
-# Primary'e bağlan 
-psql -h 10.119.14.59 -p 5000 -U postgres -c "SELECT pg_is_in_recovery();"
-
-
-# Replica'ya bağlan
-psql -h 10.119.14.59 -p 5001 -U postgres -c "SELECT pg_is_in_recovery();"
-
+psql -h 10.40.70.200 -p 5000 -U postgres -W -c "SELECT pg_is_in_recovery();"
 ```
 
-### 8.4 Replikasyon Durumu
+Expected output: `f` (false) - this node is the primary and accepts writes.
+
+### 13.5 - Replica Connection Test (Read)
 
 ```bash
-psql -h 10.119.14.59 -p 5000 -U postgres -c "SELECT * FROM pg_stat_replication;"
+psql -h 10.40.70.200 -p 5001 -U postgres -W -c "SELECT pg_is_in_recovery();"
 ```
 
-2 satır dönmelidir — her replica için bir kayıt.
+Expected output: `t` (true) - this node is a replica in recovery mode.
 
-### 8.5 Failover Testi
+### 13.6 - Replication Status
 
 ```bash
-# Patroni üzerinden manuel failover
-patronictl -c /etc/patroni/patroni.yml failover postgres-cluster
-
-# Yeni leader'ı kontrol et
-patronictl -c /etc/patroni/patroni.yml list
+psql -h 10.40.70.200 -p 5000 -U postgres -W -c "SELECT client_addr, state, sent_lsn, write_lsn, replay_lsn FROM pg_stat_replication;"
 ```
+
+Two rows must be returned, one per replica.
+
 
 ---
-
-## 9. Notlar
-
-### Ansible Versiyon Gereksinimi
-Autobase minimum **Ansible 2.17.0** gerektirir. Ubuntu 24.04 varsayılan reposunda 2.16.x gelmektedir. PPA üzerinden güncelleme yapılmalıdır.
-
-### Bağlantı Noktaları
-
-| Port | Servis | Açıklama |
-|------|--------|----------|
-| 5432 | PostgreSQL | Direkt PG bağlantısı |
-| 5000 | HAProxy | Primary (yazma) |
-| 5001 | HAProxy | Replica (okuma) |
-| 6432 | PgBouncer | Connection pooling |
-| 8008 | Patroni API | Health check |
-| 2379 | etcd | Client |
-| 2380 | etcd | Peer |
-
-
-**Kullanılan teknolojiler:**
-- **Patroni** — PostgreSQL HA orchestration
-- **etcd** — Distributed configuration store (DCS)
-- **PgBouncer** — Connection pooling
-- **HAProxy** — Load balancing
-- **Netdata** — Monitoring
