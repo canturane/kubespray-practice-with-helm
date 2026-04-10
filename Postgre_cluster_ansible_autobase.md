@@ -361,16 +361,29 @@ All five services must show `active (running)`.
 
 ### 13.2 - Virtual IP Assignment
 
+VIP is managed by Keepalived and floats between nodes based on HAProxy health scores. It is not guaranteed to be on pg-master — it may be assigned to any of the three nodes. Check all nodes to find where the VIP is currently assigned.
+
+**On pg-master:**
 ```bash
 ip a | grep 10.40.70.200
 ```
 
-Expected output:
+**On pg-worker1:**
+```bash
+ssh root@pg-worker1 "ip a | grep 10.40.70.200"
+```
+
+**On pg-worker2:**
+```bash
+ssh root@pg-worker2 "ip a | grep 10.40.70.200"
+```
+
+Expected output on whichever node holds the VIP:
 ```
 inet 10.40.70.200/32 scope global enp0s3
 ```
 
-The VIP is bound to the current Leader node.
+other two nodes will return no output for this command. This is expected behavior — only one node holds the VIP at any given time.
 
 ### 13.3 - Patroni Cluster State
 
